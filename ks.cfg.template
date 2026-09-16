@@ -1,0 +1,253 @@
+# Runs before initializing and running the `ks.cfg` file.
+%pre
+  # Switch to input terminal.
+  exec < /dev/tty6 > /dev/tty6 2> /dev/tty6
+  chvt 6
+
+  RED='\e[0;31m'
+  GREEN='\e[0;32m'
+  YELLOW='\e[1;33m'
+  NC='\e[0m'
+
+  #######################
+  # Destruction Warning #
+  #######################
+
+  echo -e "\n${RED}  ⚠ WARNING: Continuing will wipe everything on the selected disk!"
+  echo -e "             Proceed with caution or turn off computer now.${NC}"
+  echo -e "\n    Press anything to continue..."
+  read -s -n 1
+
+  #################
+  # Setup Network #
+  #################
+
+  CONNECTED="false"
+
+  while [ $CONNECTED = "false" ]; do
+    echo -e "\n${YELLOW}  • Starting Network Configuration...${NC}"
+
+    read -p $"    Wifi or Ethernet? [wifi/eth] " NETWORK_TYPE
+    case "$NETWORK_TYPE" in
+      wifi)
+        # Initialize wifi.
+        echo -e "\n${YELLOW}  • Initializing wifi...${NC}"
+        nmcli radio wifi on
+        sleep 5
+        if [ "$(nmcli radio wifi)" = "disabled" ]; then
+          echo -e "${RED}    ⚠ Error: WiFi radio off, retrying... :(${NC}"
+          continue
+        fi
+        echo -e "    Wifi initialized!"
+        sleep 3
+
+        # Pick SSID.
+        echo -e "\n${YELLOW}  • Retrieving Wifi SSID list..."
+        sleep 3
+        nmcli dev wifi list
+        # Ask if we want to refresh the wifi list or quit.
+        echo -e "\n    refresh\tRefresh the list" \
+                "\n    *\t\tInput SSID instead of giving a command."
+        SSID_ANSWER=""
+        read -p $'      ' SSID_ANSWER
+        case "$SSID_ANSWER" in
+          refresh)
+            continue
+            ;;
+          *)
+            ;;
+        esac
+        WIFI_PASSWORD=""
+        read -p $'      Password: ' -s WIFI_PASSWORD
+        echo -e "\n      Connecting..."
+        nmcli dev wifi connect "$SSID_ANSWER" password "$WIFI_PASSWORD" &> /dev/null
+        sleep 5
+
+        if nmcli dev status | grep -qP "wifi.*connected.*${SSID_ANSWER}"; then
+          echo -e "${GREEN}      Connected to \`${SSID_ANSWER}\`!${NC}"
+          CONNECTED="true"
+        else
+          echo -e "${RED}      ⚠ Error: connecting, retrying... :(${NC}"
+          sleep 5
+          continue
+        fi
+        ;;
+      eth)
+        CONNECTED="true"
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    echo -e "\n${YELLOW}  • Testing Internet Connectivity...${NC}"
+    sleep 5
+
+    # Testing connectivity.
+    if ! ping -q -c1 9.9.9.9 &> /dev/null; then
+      echo -e "${RED}    ⚠ Error: Can't reach the internet :(${NC}"
+      CONNECTED="false"
+      continue
+    fi
+    echo -e "${GREEN}      Connected to the internet!${NC}"
+  done
+
+  ###################################
+  # Choose Locale, Keyboard & TZ    #
+  ###################################
+
+  echo -e "\n${YELLOW}  • Configuring Locale & Keyboard:${NC}"
+  read -p "    Language [en_US.UTF-8]: " LANG_VAL
+  LANG_VAL="${LANG_VAL:-en_US.UTF-8}"
+
+  read -p "    Virtual console keymap [us]: " VC_VAL
+  VC_VAL="${VC_VAL:-us}"
+
+  read -p "    X layout [us]: " X11_VAL
+  X11_VAL="${X11_VAL:-us}"
+
+  read -p "    Timezone [Europe/Amsterdam]: " TZ_VAL
+  TZ_VAL="${TZ_VAL:-Europe/Amsterdam}"
+
+  ######################
+  # Choose Disk Device #
+  ######################
+
+  DISK_DEVICE=""
+  while true; do
+    echo -e "\n${YELLOW}  • Choose disk device to install to (without /dev/):${NC}"
+    lsblk -d -n -o NAME,SIZE,MODEL
+    read -p "    Disk device: " DISK_DEVICE
+
+    if [ -z "$DISK_DEVICE" ]; then
+      continue
+    fi
+
+    if lsblk -d -n -o NAME | grep -qx "$DISK_DEVICE"; then
+      break
+    fi
+
+    echo -e "${RED}    ⚠ \`$DISK_DEVICE\` is not a valid disk device, try again.${NC}"
+  done
+
+  ##########################
+  # Choose Disk Encryption #
+  ##########################
+
+  echo -e "\n${YELLOW}  • Configuring disk encryption:${NC}"
+  read -n 1 -p $'    Do you want disk encryption? [yn] ' ENCRYPTION
+
+  case "$ENCRYPTION" in
+    y)
+      echo
+      while true; do
+        read -s -p "    Input encryption password: " ENCRYPTION_PASSWORD
+        echo
+        read -s -p "    Confirm encryption password: " ENCRYPTION_PASSWORD_CONFIRM
+        echo
+        if [ "$ENCRYPTION_PASSWORD" = "$ENCRYPTION_PASSWORD_CONFIRM" ]; then
+          break
+        fi
+        echo -e "${RED}    ⚠ Passwords do not match, try again.${NC}"
+      done
+      ;;
+    *)
+      ;;
+  esac
+
+  ########################
+  # Choose Root password #
+  ########################
+
+  echo -e "\n\n${YELLOW}  • Configuring Root Password:${NC}"
+  while true; do
+    read -s -p "    Input root password: " ROOT_PASSWORD
+    echo
+    read -s -p "    Confirm root password: " ROOT_PASSWORD_CONFIRM
+    echo
+    if [ "$ROOT_PASSWORD" = "$ROOT_PASSWORD_CONFIRM" ]; then
+      break
+    fi
+    echo -e "${RED}    ⚠ Passwords do not match, try again.${NC}"
+  done
+
+  ##########################
+  # persist dynamic config #
+  ##########################
+
+  {
+    echo "keyboard --vckeymap=\"$VC_VAL\" --xlayouts=\"$X11_VAL\""
+    echo "lang \"$LANG_VAL\""
+    echo "timezone \"$TZ_VAL\" --utc"
+    echo "ignoredisk --only-use=\"$DISK_DEVICE\""
+    echo "clearpart --all --initlabel"
+    echo "bootloader"
+
+    if [ "$ENCRYPTION" = "y" ]; then
+      echo "autopart --noswap --encrypted --passphrase=\"$ENCRYPTION_PASSWORD\""
+    else
+      echo "autopart --noswap"
+    fi
+
+    echo "rootpw \"$ROOT_PASSWORD\""
+  } > /tmp/dynamic_commands
+
+  #######################
+  # Destruction Warning #
+  #######################
+
+  echo -e "\n\n${RED}  ⚠ LAST WARNING: /dev/$DISK_DEVICE will be wiped!"
+  echo -e "                  Proceed with caution or turn off computer now.${NC}"
+  echo -e "\n    Press anything to continue..."
+  read -s -n 1
+
+  # Give stdin back to anaconda.
+  chvt 1
+  exec < /dev/tty1 > /dev/tty1 2> /dev/tty1
+%end
+
+# Defaults.
+cmdline
+
+# Include commands with password/locale/keyboard generated in %pre.
+%include "/tmp/dynamic_commands"
+
+# Sources.
+repo --name="fedora" --mirrorlist="https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-$releasever&arch=$basearch"
+repo --name="updates" --mirrorlist="https://mirrors.fedoraproject.org/mirrorlist?repo=updates-released-f$releasever&arch=$basearch"
+url --mirrorlist="https://mirrors.fedoraproject.org/mirrorlist?repo=fedora-$releasever&arch=$basearch"
+
+# Packages
+%packages --exclude-weakdeps
+  # Defaults.
+  @core
+  -man-db
+  -openssh-server
+  -zram-generator-defaults
+  -firewalld
+  -systemd-resolved
+  -plymouth
+  -nano
+
+  linux-firmware
+  NetworkManager
+
+  {{ add_packages }}
+
+  {{ remove_packages }}
+%end
+
+# Runs in chroot on the new system.
+%post
+  # Refresh mirrorlist and update dependencies.
+  dnf update --setopt=install_weak_deps=False --refresh -y
+
+  # Remove all saved NetworkManager passwords.
+  rm -f /etc/NetworkManager/system-connections/*
+
+  # Remove anaconda files
+  rm -f /root/*.cfg
+%end
+
+# Finish.
+reboot
